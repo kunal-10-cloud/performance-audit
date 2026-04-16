@@ -100,26 +100,41 @@ The pipeline automatically:
 
 ---
 
-### Step 3b — Lighthouse Core Web Vitals
+### Step 3b — Lighthouse Core Web Vitals (Desktop + Mobile)
 
 **Skip if:** template from Step 3 is `expo` (native app, no web preview). Note "Lighthouse: N/A (native app)" and proceed to Step 4.
 
-Call the Lighthouse MCP tool to measure real browser performance:
+Run two Lighthouse audits sequentially — desktop first, then mobile:
 
+**Desktop audit:**
 ```
 run_lighthouse_audit(
   url: "{preview_url}",
-  categories: ["performance"]
+  categories: ["performance"],
+  deviceType: "desktop"
+)
+```
+
+**Mobile audit:**
+```
+run_lighthouse_audit(
+  url: "{preview_url}",
+  categories: ["performance"],
+  deviceType: "mobile"
 )
 ```
 
 Where `{preview_url}` defaults to `https://{slug}.preview.emergentagent.com` unless the user provided a different URL.
 
-**Output includes:**
+**Desktop output includes:**
 - **Performance score** (0-100)
 - **Core Web Vitals:** FCP, LCP, CLS, TBT, Speed Index, TTI
 - **Opportunities:** Ranked improvements with estimated time savings in ms
 - **Diagnostics:** LCP element, layout shifts, long tasks, DOM size, unused JS/CSS
+
+**Mobile output additionally includes:**
+- **Mobile-specific diagnostics:** `tap-targets` (touch target sizes), `viewport` (meta viewport check), `font-display` (font loading strategy)
+- **Throttled metrics:** 4G network simulation (150ms latency, 1600kbps download) + 4x CPU slowdown on a 375x667 viewport
 
 **Threshold ratings** (Google's published standards):
 
@@ -130,12 +145,13 @@ Where `{preview_url}` defaults to `https://{slug}.preview.emergentagent.com` unl
 | CLS | <=0.1 | 0.1-0.25 | >0.25 |
 | TBT | <=200 ms | 200-600 ms | >600 ms |
 
-**Note:** Measured after cold start (pod was just woken in Step 2). Metrics may be slightly inflated vs warm requests. Note "measured after cold start" in the report.
+**Note:** Desktop measured without throttling. Mobile measured with 4G throttling + CPU slowdown. Both measured after cold start.
 
 **Error handling:**
 - Template is `expo` -> skip entirely, note "N/A (native app)"
-- Connection refused / timeout -> record failure, continue to Step 4
-- Lighthouse error -> record error message, continue to Step 4
+- Desktop audit fails -> record error, still attempt mobile audit, continue to Step 4
+- Mobile audit fails -> record error, continue with desktop results only. Do NOT let mobile failure block the pipeline.
+- Both fail -> record both errors, continue to Step 4
 
 ---
 
@@ -161,12 +177,25 @@ If runtime evidence confirms a static finding, mark it as confirmed. If logs are
 
 Cross-reference Step 3 static findings with Step 3b Lighthouse results and Step 4 runtime evidence:
 
-**Static <-> Lighthouse correlation:**
+**Static <-> Desktop Lighthouse correlation:**
 - Poor LCP + static "missing code splitting" or "heavy bundle" -> mark as "Confirmed by Lighthouse"
 - Poor TBT + static "sync route handlers" or "blocking work" -> mark as confirmed
 - Poor CLS + static "no image dimensions" -> mark as confirmed
 - Lighthouse score 90+ -> note "Runtime metrics healthy" — static findings are optimization opportunities
 - Lighthouse opportunities with savings >100ms -> map to fix prompts
+
+**Desktop <-> Mobile Lighthouse comparison:**
+- Mobile score 20+ points below desktop -> flag as "Significant mobile performance gap" in the report
+- Mobile LCP > 4000ms while desktop LCP < 2500ms -> correlate with static "missing responsive images" or "no code splitting"
+- Mobile TBT > 600ms -> correlate with static "heavy bundle" or "unminified JS"
+- `tap-targets` diagnostic failing -> correlate with static "small touch targets" finding
+- `viewport` diagnostic failing -> correlate with static "missing meta viewport" finding
+- If mobile audit unavailable -> skip comparison, note in report
+
+**Static mobile checks <-> Mobile Lighthouse correlation:**
+- Static "missing meta viewport" + Lighthouse `viewport` failing -> mark as "Confirmed by Lighthouse"
+- Static "no media queries" + poor mobile score -> mark as "Confirmed — no responsive layout"
+- Static "100vh usage" + mobile CLS > 0.1 -> mark as confirmed
 
 **Static <-> Runtime correlation:**
 - Runtime timeout errors -> confirm slow endpoint findings
@@ -201,12 +230,15 @@ Write the final report as markdown at `perf-audit/reports/{slug}.md`. Follow thi
 
 ### Per-category breakdown
 {Table: Category | Critical | High | Low | Pass | Total Checks | Score}
+{Categories: Backend Performance, Rendering Performance, Database, Algorithms & Code Quality, Mobile & Responsive}
+{Mobile & Responsive row omitted for Expo apps}
 
 ### Top 3 highest-impact findings
 {Numbered list — 1-sentence plain-language summary each}
 
 ### Lighthouse Metrics Dashboard
-{Table: Metric | Value | Target | Status emoji}
+{Table: Metric | Desktop | Mobile | Target | Status emoji}
+{Show both desktop and mobile values side by side. If mobile audit failed, show "N/A" with a note.}
 {Below the table, a "What these mean" block explaining each metric in plain language}
 
 ---
@@ -236,6 +268,25 @@ Write the final report as markdown at `perf-audit/reports/{slug}.md`. Follow thi
 
 ## Lighthouse Opportunities
 {Table: Opportunity | Estimated Savings | What it means — plain language}
+
+---
+
+## Mobile Responsiveness
+
+### Mobile vs Desktop Comparison
+{Table: Metric | Desktop | Mobile | Delta | Status}
+{Include: Performance Score, LCP, FCP, CLS, TBT}
+{Delta column shows the difference. Flag as 🔴 if mobile is 20+ points worse or metric crosses a threshold boundary}
+{If mobile audit unavailable: show "N/A" for mobile column with note: "Mobile Lighthouse audit failed: {error}"}
+
+### Mobile-Specific Diagnostics (from Lighthouse)
+{Table: Diagnostic | Result | What it means}
+{Include: tap-targets, viewport, font-display — only if mobile audit ran}
+{If mobile audit failed: "Mobile Lighthouse audit was unavailable. Mobile findings below are from static analysis only."}
+
+### Mobile Static Analysis Findings
+{List PERF-IDs from the mobile_responsive category in the standard finding format}
+{These always appear regardless of whether mobile Lighthouse ran — they come from perf_audit.py}
 
 ---
 

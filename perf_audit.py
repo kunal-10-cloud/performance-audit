@@ -1127,7 +1127,205 @@ def check_missing_parallelization(backend_files, frontend_files):
     return findings
 
 # ---------------------------------------------------------------------------
-# Step 5: Scoring
+# Step 5: Mobile & Responsive Checks (web templates only, skip Expo)
+# ---------------------------------------------------------------------------
+
+HTML_ENTRY_FILES = {"index.html", "_document.js", "_document.tsx", "document.js",
+                     "document.tsx", "app.html", "layout.tsx", "layout.js"}
+
+
+def check_meta_viewport(frontend_files, all_files, root):
+    """5.1 — Check for <meta name="viewport"> in HTML entry points."""
+    findings = []
+    candidates = []
+    for fpath in all_files:
+        fname = os.path.basename(fpath)
+        if fname in HTML_ENTRY_FILES:
+            candidates.append(fpath)
+    for subpath in ["public/index.html", "frontend/public/index.html",
+                    "src/index.html", "frontend/index.html",
+                    "pages/_document.tsx", "pages/_document.js",
+                    "frontend/pages/_document.tsx", "frontend/pages/_document.js",
+                    "app/layout.tsx", "app/layout.js",
+                    "frontend/app/layout.tsx", "frontend/app/layout.js"]:
+        fpath = os.path.join(root, subpath)
+        if os.path.exists(fpath) and fpath not in candidates:
+            candidates.append(fpath)
+
+    if not candidates:
+        return findings
+
+    found_viewport = False
+    incomplete_viewport = None
+    for fpath in candidates:
+        content = read_file_safe(fpath)
+        if not content:
+            continue
+        if re.search(r'<meta\s+name=["\']viewport["\']', content, re.IGNORECASE):
+            found_viewport = True
+            viewport_match = re.search(
+                r'<meta\s+name=["\']viewport["\']\s+content=["\']([^"\']*)["\']',
+                content, re.IGNORECASE
+            )
+            if viewport_match:
+                vp_content = viewport_match.group(1)
+                if 'width=device-width' not in vp_content:
+                    line = content[:viewport_match.start()].count('\n') + 1
+                    incomplete_viewport = (fpath, line, vp_content)
+            break
+
+    if not found_viewport:
+        findings.append(new_finding(
+            "mobile_responsive", "A",
+            "Missing meta viewport tag",
+            candidates[0], 0,
+            "No `<meta name=\"viewport\">` tag found in HTML entry point",
+            "Mobile browsers render at desktop width and shrink — text unreadable, tap targets tiny",
+            'Add `<meta name="viewport" content="width=device-width, initial-scale=1">` to the HTML <head>'
+        ))
+    elif incomplete_viewport:
+        fpath, line, vp_content = incomplete_viewport
+        findings.append(new_finding(
+            "mobile_responsive", "B",
+            "Incomplete viewport meta tag",
+            fpath, line,
+            f"Viewport meta tag has `content=\"{vp_content}\"` — missing `width=device-width`",
+            "Page may not scale correctly on mobile devices",
+            'Update to `content="width=device-width, initial-scale=1"`'
+        ))
+
+    return findings
+
+
+def check_media_query_coverage(frontend_files):
+    """5.2 — Check CSS/JSX/TSX for mobile-width media queries."""
+    findings = []
+    has_any_media = False
+    has_mobile_breakpoint = False
+    files_with_styles = 0
+
+    mobile_bp_pattern = re.compile(
+        r'@media[^{]*max-width\s*:\s*(\d+)\s*px'
+        r'|@media[^{]*min-width\s*:\s*(\d+)\s*px'
+    )
+    any_media_pattern = re.compile(r'@media\s*[\(\[]')
+
+    for fpath in frontend_files:
+        ext = os.path.splitext(fpath)[1].lower()
+        if ext not in {'.css', '.scss', '.less', '.jsx', '.tsx', '.js', '.ts'}:
+            continue
+        content = read_file_safe(fpath)
+        if not content:
+            continue
+        if 'style' in content.lower() or ext in {'.css', '.scss', '.less'}:
+            files_with_styles += 1
+
+        if any_media_pattern.search(content):
+            has_any_media = True
+
+        for match in mobile_bp_pattern.finditer(content):
+            max_w = match.group(1)
+            min_w = match.group(2)
+            if max_w and int(max_w) <= 768:
+                has_mobile_breakpoint = True
+            if min_w and int(min_w) <= 480:
+                has_mobile_breakpoint = True
+
+    if files_with_styles > 0 and not has_any_media:
+        findings.append(new_finding(
+            "mobile_responsive", "B",
+            "No responsive media queries found",
+            "project-wide", 0,
+            f"Scanned {files_with_styles} style-containing files — no `@media` rules detected",
+            "Layout is fixed-width — will overflow or appear broken on mobile screens",
+            "Add responsive breakpoints: `@media (max-width: 768px) { ... }` for tablet and `@media (max-width: 480px) { ... }` for mobile"
+        ))
+    elif has_any_media and not has_mobile_breakpoint:
+        findings.append(new_finding(
+            "mobile_responsive", "B",
+            "No mobile-width breakpoint",
+            "project-wide", 0,
+            "Media queries found but none target mobile widths (<=768px)",
+            "Layout may adapt for tablets but break on phone-sized screens",
+            "Add a mobile breakpoint: `@media (max-width: 480px) { ... }` for phone layouts"
+        ))
+
+    return findings
+
+
+def check_touch_targets(frontend_files):
+    """5.3 — Flag buttons/clickable elements with explicit small sizes in JSX/TSX."""
+    findings = []
+    small_size_pattern = re.compile(
+        r'(?:width|height|minWidth|minHeight)\s*[:=]\s*["\']?(\d+)(?:px)?["\']?'
+    )
+    interactive_context = re.compile(
+        r'<(?:button|Button|TouchableOpacity|TouchableHighlight|Pressable|a |Link )[^>]*'
+    )
+
+    for fpath in frontend_files:
+        ext = os.path.splitext(fpath)[1].lower()
+        if ext not in {'.jsx', '.tsx'}:
+            continue
+        content = read_file_safe(fpath)
+        if not content:
+            continue
+
+        for match in interactive_context.finditer(content):
+            element_str = content[match.start():match.start() + 500]
+            close = element_str.find('>')
+            if close > 0:
+                element_str = element_str[:close]
+
+            for size_match in small_size_pattern.finditer(element_str):
+                val = int(size_match.group(1))
+                if 0 < val < 44:
+                    line = content[:match.start()].count('\n') + 1
+                    findings.append(new_finding(
+                        "mobile_responsive", "B",
+                        f"Small touch target ({val}px)",
+                        fpath, line,
+                        f"Interactive element has explicit size {val}px — below 44px minimum for touch targets",
+                        "Users on mobile will struggle to tap small buttons — causes mis-taps and frustration",
+                        "Set minimum touch target size to 44x44px (Apple HIG) or 48x48px (Material Design)"
+                    ))
+                    break  # One per element
+
+        if len(findings) >= 10:
+            break
+
+    return findings
+
+
+def check_viewport_units(frontend_files):
+    """5.4 — Flag 100vh usage (problematic on mobile browsers)."""
+    findings = []
+    vh_pattern = re.compile(r'(?:height|min-height|max-height)\s*:\s*100vh')
+
+    for fpath in frontend_files:
+        content = read_file_safe(fpath)
+        if not content:
+            continue
+
+        for match in vh_pattern.finditer(content):
+            line = content[:match.start()].count('\n') + 1
+            findings.append(new_finding(
+                "mobile_responsive", "C",
+                "100vh usage (mobile address bar issue)",
+                fpath, line,
+                "`height: 100vh` includes the area behind the mobile browser address bar",
+                "Content is clipped or requires scrolling on mobile — the address bar takes ~56px that 100vh doesn't account for",
+                "Replace with `height: 100dvh` (dynamic viewport height), or use `min-height: 100vh` with `min-height: -webkit-fill-available` fallback"
+            ))
+
+        if len(findings) >= 5:
+            break
+
+    return findings[:5]
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Scoring
 # ---------------------------------------------------------------------------
 
 def calculate_scores(findings):
@@ -1145,12 +1343,14 @@ def calculate_scores(findings):
     backend = category_findings.get("backend_efficiency", {"A": 0, "B": 0, "C": 0, "D": 0})
     rendering = category_findings.get("rendering_performance", {"A": 0, "B": 0, "C": 0, "D": 0})
     algorithms = category_findings.get("code_algorithms", {"A": 0, "B": 0, "C": 0, "D": 0})
+    mobile = category_findings.get("mobile_responsive", {"A": 0, "B": 0, "C": 0, "D": 0})
 
     backend_score = category_score(backend)
     rendering_score = category_score(rendering)
     algorithms_score = category_score(algorithms)
+    mobile_score = category_score(mobile)
 
-    weighted = (backend_score * 0.35) + (rendering_score * 0.35) + (algorithms_score * 0.30)
+    weighted = (backend_score * 0.30) + (rendering_score * 0.30) + (algorithms_score * 0.25) + (mobile_score * 0.15)
 
     # Count total A/B/C/D
     total_counts = {"A": 0, "B": 0, "C": 0, "D": 0}
@@ -1172,9 +1372,10 @@ def calculate_scores(findings):
         "score": round(weighted, 1),
         "grade": grade,
         "category_scores": {
-            "backend_efficiency": {"score": backend_score, "weight": 0.35},
-            "rendering_performance": {"score": rendering_score, "weight": 0.35},
-            "code_algorithms": {"score": algorithms_score, "weight": 0.30},
+            "backend_efficiency": {"score": backend_score, "weight": 0.30},
+            "rendering_performance": {"score": rendering_score, "weight": 0.30},
+            "code_algorithms": {"score": algorithms_score, "weight": 0.25},
+            "mobile_responsive": {"score": mobile_score, "weight": 0.15},
         },
         "finding_counts": total_counts,
     }
@@ -1222,7 +1423,14 @@ def main():
     findings.extend(check_inefficient_data_structures(backend_files, frontend_files))
     findings.extend(check_missing_parallelization(backend_files, frontend_files))
 
-    # Step 5: Scoring
+    # Step 5: Mobile & Responsive Checks (skip for Expo — native app)
+    if template != "expo":
+        findings.extend(check_meta_viewport(frontend_files, all_files, root))
+        findings.extend(check_media_query_coverage(frontend_files))
+        findings.extend(check_touch_targets(frontend_files))
+        findings.extend(check_viewport_units(frontend_files))
+
+    # Step 6: Scoring
     scores = calculate_scores(findings)
 
     # Output JSON (same pattern as audit.py)

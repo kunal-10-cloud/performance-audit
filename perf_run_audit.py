@@ -61,6 +61,12 @@ def check_key(f):
     if "Nested iteration" in t: return "algorithmic_complexity"
     if "Array lookup" in t: return "inefficient_data_structures"
     if "Sequential API" in t: return "promise_parallelization"
+    if "viewport" in t.lower() and "meta" in t.lower(): return "meta_viewport"
+    if "viewport" in t.lower() and "incomplete" in t.lower(): return "meta_viewport"
+    if "media quer" in t.lower(): return "media_query_coverage"
+    if "mobile-width" in t.lower(): return "media_query_coverage"
+    if "touch target" in t.lower(): return "touch_targets"
+    if "100vh" in t or "viewport unit" in t.lower(): return "viewport_units"
     return "other"
 
 grouped = defaultdict(list)
@@ -119,6 +125,12 @@ ALGO = [
     ("inefficient_data_structures", "Inefficient Data Structures", None),
     ("promise_parallelization", "Promise Parallelization", "No sequential fetch chains detected."),
 ]
+MOBILE = [
+    ("meta_viewport", "Meta Viewport Tag", "Viewport meta tag is properly configured."),
+    ("media_query_coverage", "Responsive Media Queries", "Mobile-width breakpoints detected in stylesheets."),
+    ("touch_targets", "Touch Target Sizes", "All interactive elements meet minimum touch target size (44px)."),
+    ("viewport_units", "Viewport Unit Usage (100vh)", "No problematic 100vh usage detected."),
+]
 
 # ── Build check report ──
 lines = [f"## Performance Audit — {TMAP.get(template, template)}\n"]
@@ -149,6 +161,10 @@ tpl_name = TMAP.get(template, template)
 rp, rf = render(f"2. Rendering Performance Checks ({tpl_name})", tpl)
 dp, df = render("3. Database Checks", DB)
 ap, af = render("4. Algorithm & Code Quality Checks", ALGO)
+# Mobile checks only for web templates (not Expo)
+mp, mf = 0, 0
+if template != "expo":
+    mp, mf = render("5. Mobile & Responsive Checks", MOBILE)
 
 lines.append("### Summary\n")
 lines.append("| Check Category | Pass | Fail | Total |")
@@ -157,12 +173,14 @@ lines.append(f"| Backend | {bp} | {bf} | {bp+bf} |")
 lines.append(f"| Rendering ({tpl_name}) | {rp} | {rf} | {rp+rf} |")
 lines.append(f"| Database | {dp} | {df} | {dp+df} |")
 lines.append(f"| Algorithms | {ap} | {af} | {ap+af} |")
-tp, tf = bp+rp+dp+ap, bf+rf+df+af
+if template != "expo":
+    lines.append(f"| Mobile & Responsive | {mp} | {mf} | {mp+mf} |")
+tp, tf = bp+rp+dp+ap+mp, bf+rf+df+af+mf
 lines.append(f"| **Total** | **{tp}** | **{tf}** | **{tp+tf}** |")
 
 # ── Build fix prompts ──
 prompts = ["\n\n### Fix Prompts\n", "Each prompt is self-contained. Send one at a time to your agent.\n"]
-all_c = BACKEND + tpl + DB + ALGO
+all_c = BACKEND + tpl + DB + ALGO + (MOBILE if template != "expo" else [])
 pn, seen = 0, set()
 for key, label, _ in all_c:
     if key in seen: continue
