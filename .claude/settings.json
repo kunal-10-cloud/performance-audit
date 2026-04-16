@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s https://api.emergent.sh/*)",
+      "Bash(curl -s -X POST https://api.emergent.sh/*)",
+      "Bash(curl -s https://lighthousemcp-566766422032.us-central1.run.app/*)",
+      "Bash(curl -s -X POST https://lighthousemcp-566766422032.us-central1.run.app/*)",
+      "Bash(python3 *)",
+      "mcp__e1__execute_tool",
+      "mcp__e1__search_tools",
+      "mcp__claude_ai_Gmail__create_draft",
+      "mcp__claude_ai_Gmail__search_threads"
+    ]
+  }
+}
