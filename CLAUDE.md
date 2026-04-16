@@ -114,11 +114,9 @@ CSV must have columns: `slug`, `latest_job_id`, `Perf eval`, `Fix prompt`.
 
 ## Updating the Audit Scripts
 
-The static analysis scripts are hosted on catbox.moe so they can be downloaded onto pods. When you update `perf_audit.py`:
+The static analysis scripts are served from this GitHub repo via raw URLs. Pods download them at runtime:
 
-1. Upload the new `perf_audit.py` to catbox.moe
-2. Update the URL in `perf_run_audit.py` line 9
-3. Upload the new `perf_run_audit.py` to catbox.moe
-4. Update the URL in `SKILL-perf.md` Step 3
+- `perf_run_audit.py` — downloaded by SKILL Step 3 from `raw.githubusercontent.com/kunal-10-cloud/performance-audit/main/perf_run_audit.py`
+- `perf_audit.py` — downloaded by `perf_run_audit.py` from `raw.githubusercontent.com/kunal-10-cloud/performance-audit/main/perf_audit.py`
 
-Alternatively, set the `PERF_AUDIT_URL` env var on the pod to point to your own hosted copy.
+To update: just edit the files and push to `main`. Every subsequent audit will use the latest version automatically.

