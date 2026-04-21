@@ -104,27 +104,127 @@ The pipeline automatically:
 
 **Skip if:** template from Step 3 is `expo` (native app, no web preview). Note "Lighthouse: N/A (native app)" and proceed to Step 4.
 
-Run two Lighthouse audits sequentially — desktop first, then mobile:
-
-**Desktop audit:**
-```
-run_lighthouse_audit(
-  url: "{preview_url}",
-  categories: ["performance"],
-  deviceType: "desktop"
-)
-```
-
-**Mobile audit:**
-```
-run_lighthouse_audit(
-  url: "{preview_url}",
-  categories: ["performance"],
-  deviceType: "mobile"
-)
-```
+**Lighthouse MCP URL:** `https://lighthousemcp-566766422032.us-central1.run.app`
 
 Where `{preview_url}` defaults to `https://{slug}.preview.emergentagent.com` unless the user provided a different URL.
+
+**Infrastructure note:** The Lighthouse MCP runs on Cloud Run with **concurrency=1** per container. This means desktop and mobile audits each get their own fresh container instance (no shared memory state, no Chrome contamination between audits). Don't try to reuse session IDs between desktop and mobile — they're on different containers.
+
+---
+
+#### Phase 1: Warm-up (before any Lighthouse call)
+
+**1a. Warm the Lighthouse MCP container:**
+
+```bash
+curl -s https://lighthousemcp-566766422032.us-central1.run.app/health
+```
+
+If it returns `{"status":"ok",...}` — proceed.
+If it returns 503 or times out — wait 5 seconds and retry up to 3 times.
+If still failing after 3 retries — skip Lighthouse entirely, note "Lighthouse MCP unavailable" in report, proceed to Step 4.
+
+**1b. Warm the preview URL:**
+
+```bash
+curl -s -o /dev/null "{preview_url}"
+```
+
+This ensures the app's dev server has compiled assets and is ready. Without this, Lighthouse measures a cold-starting app and scores are artificially worse.
+
+---
+
+#### Phase 2: Desktop Audit (with retries)
+
+Follow this exact MCP protocol flow. **Retry up to 3 times** if any step fails.
+
+**Step 1 — Initialize MCP session:**
+```bash
+curl -s -D /tmp/lh_headers -o /tmp/lh_body -X POST https://lighthousemcp-566766422032.us-central1.run.app/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"perf-audit","version":"1.0.0"}}}'
+```
+
+Extract the session ID from the response headers:
+```bash
+SESSION_ID=$(grep -i "mcp-session-id" /tmp/lh_headers | sed 's/.*: //' | tr -d '\r\n')
+```
+
+If `SESSION_ID` is empty or the response was 503 — this is a cold start failure. Wait 5 seconds, hit `/health` again, and retry from Step 1.
+
+**Step 2 — Call the desktop audit:**
+```bash
+curl -s --max-time 300 -X POST https://lighthousemcp-566766422032.us-central1.run.app/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: {SESSION_ID}" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_lighthouse_audit","arguments":{"url":"{preview_url}","categories":["performance"],"deviceType":"desktop"}}}'
+```
+
+**Success:** Response contains `"result":{"content":[{"type":"text","text":"..."}]}` with JSON scores and metrics.
+
+**Failure indicators (retry if any):**
+- Empty response body
+- `"error"` in response (e.g., "Server not initialized", "Bad Request")
+- HTTP 503 or 504
+- Timeout (no response within 300 seconds)
+
+**Retry procedure:**
+```
+Attempt 1: Run Steps 1-2 as above
+  If fails → wait 5 seconds
+Attempt 2: Hit /health first to re-warm, then fresh Steps 1-2
+  If fails → wait 5 seconds
+Attempt 3: Hit /health, fresh Steps 1-2
+  If fails → record "Desktop Lighthouse: unavailable after 3 attempts — {last error}"
+             Continue to mobile audit (it may work on a fresh container)
+```
+
+---
+
+#### Phase 3: Mobile Audit (fresh session, with retries)
+
+**Important:** Cloud Run is configured with `concurrency=1`, so each audit request lands on a **separate container instance**. The desktop session ID is NOT reusable for mobile — they're on different containers. Always create a fresh session for mobile.
+
+**Step 1 — Initialize a fresh MCP session:**
+```bash
+curl -s -D /tmp/lh_hm -o /tmp/lh_bm -X POST https://lighthousemcp-566766422032.us-central1.run.app/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"perf-audit-mobile","version":"1.0.0"}}}'
+```
+
+Extract the session ID:
+```bash
+MOBILE_SESSION_ID=$(grep -i "mcp-session-id" /tmp/lh_hm | sed 's/.*: //' | tr -d '\r\n')
+```
+
+If `MOBILE_SESSION_ID` is empty or 503 — cold start failure. Wait 5s, hit `/health`, retry.
+
+**Step 2 — Call the mobile audit:**
+```bash
+curl -s --max-time 300 -X POST https://lighthousemcp-566766422032.us-central1.run.app/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: {MOBILE_SESSION_ID}" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_lighthouse_audit","arguments":{"url":"{preview_url}","categories":["performance"],"deviceType":"mobile"}}}'
+```
+
+**Retry procedure (identical to desktop):**
+```
+Attempt 1: Steps 1-2 as above
+  If fails (empty body, 503, "Server not initialized", timeout) → wait 5 seconds
+Attempt 2: Hit /health, fresh Steps 1-2
+  If fails → wait 5 seconds
+Attempt 3: Hit /health, fresh Steps 1-2
+  If fails → record "Mobile Lighthouse: unavailable after 3 attempts — {last error}"
+             Continue to Step 4
+```
+
+---
+
+#### Output
 
 **Desktop output includes:**
 - **Performance score** (0-100)
@@ -134,7 +234,7 @@ Where `{preview_url}` defaults to `https://{slug}.preview.emergentagent.com` unl
 
 **Mobile output additionally includes:**
 - **Mobile-specific diagnostics:** `tap-targets` (touch target sizes), `viewport` (meta viewport check), `font-display` (font loading strategy)
-- **Throttled metrics:** 4G network simulation (150ms latency, 1600kbps download) + 4x CPU slowdown on a 375x667 viewport
+- **Throttled metrics:** Moto G Power emulation (412x823@1.75), 4G throttling (150ms latency, 1638kbps download, 4x CPU slowdown)
 
 **Threshold ratings** (Google's published standards):
 
@@ -145,13 +245,18 @@ Where `{preview_url}` defaults to `https://{slug}.preview.emergentagent.com` unl
 | CLS | <=0.1 | 0.1-0.25 | >0.25 |
 | TBT | <=200 ms | 200-600 ms | >600 ms |
 
-**Note:** Desktop measured without throttling. Mobile measured with 4G throttling + CPU slowdown. Both measured after cold start.
+---
 
-**Error handling:**
-- Template is `expo` -> skip entirely, note "N/A (native app)"
-- Desktop audit fails -> record error, still attempt mobile audit, continue to Step 4
-- Mobile audit fails -> record error, continue with desktop results only. Do NOT let mobile failure block the pipeline.
-- Both fail -> record both errors, continue to Step 4
+#### Graceful degradation
+
+| Scenario | What to do in report |
+|---|---|
+| Desktop succeeded, mobile failed | Show desktop metrics normally. Mobile column shows "N/A — unavailable". Skip Mobile vs Desktop Comparison. |
+| Desktop failed, mobile succeeded | Show mobile metrics normally. Desktop column shows "N/A — unavailable". |
+| Both failed | Omit Lighthouse Metrics Dashboard and Mobile Responsiveness sections entirely. Note "Lighthouse MCP was unavailable — report based on static analysis only." Static analysis findings are always available. |
+| Both succeeded | Full report with desktop + mobile comparison. |
+
+**IMPORTANT:** Lighthouse failures must NEVER block the pipeline. Static analysis (Step 3) and runtime evidence (Step 4) are independent and always produce results regardless of Lighthouse status.
 
 ---
 
