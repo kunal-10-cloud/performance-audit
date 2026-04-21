@@ -6,7 +6,7 @@ description: Performance audit pipeline. Takes a Job ID + Slug Name + Preview UR
 # Performance Audit Skill
 
 ## Purpose
-Run a pre-launch performance audit on an Emergent app. Detects the app template (Next.js / Expo / Farm), runs 36 static checks across backend, rendering, database, algorithms, and mobile responsiveness, measures Core Web Vitals via Google Lighthouse on desktop and mobile, correlates static and runtime findings, then produces a PASS/FAIL report with copy-pasteable fix prompts.
+Run a pre-launch performance audit on an Emergent app. Detects the app template (Next.js / Expo / Farm), runs 36 static checks across backend, rendering, database, algorithms, and mobile responsiveness, measures Core Web Vitals via Google Lighthouse on desktop and mobile, correlates static findings with Lighthouse results, then produces a report with copy-pasteable fix prompts.
 
 ---
 
@@ -106,7 +106,7 @@ mcp__e1__execute_tool(
 )
 ```
 
-> **Architecture:** `perf_run_audit.py` (wrapper) downloads `perf_audit.py` (engine) from its hardcoded URL, runs it, parses JSON, and formats the PASS/FAIL report. Two files on catbox — only the wrapper URL goes here.
+> **Architecture:** `perf_run_audit.py` (wrapper) is downloaded onto the pod first. It then downloads `perf_audit.py` (the analysis engine) from GitHub raw, runs it, parses the JSON output, and formats the PASS/FAIL report. Both files are hosted in `kunal-10-cloud/performance-audit` on GitHub — only the wrapper URL is referenced directly here.
 
 The pipeline automatically:
 1. **Detects template** from `package.json` / `app.json` / `next.config.js`
@@ -123,7 +123,7 @@ The pipeline automatically:
 
 ### Step 3b — Lighthouse Core Web Vitals (Desktop + Mobile)
 
-**Skip if:** template from Step 3 is `expo` (native app, no web preview). Note "Lighthouse: N/A (native app)" and proceed to Step 4.
+**Skip if:** template from Step 3 is `expo` (native app, no web preview). Note "Lighthouse: N/A (native app)" and proceed to Step 4 (Correlate).
 
 **Lighthouse MCP URL:** `https://lighthousemcp-566766422032.us-central1.run.app`
 
@@ -143,7 +143,7 @@ curl -s https://lighthousemcp-566766422032.us-central1.run.app/health
 
 If it returns `{"status":"ok",...}` — proceed.
 If it returns 503 or times out — wait 5 seconds and retry up to 3 times.
-If still failing after 3 retries — skip Lighthouse entirely, note "Lighthouse MCP unavailable" in report, proceed to Step 4.
+If still failing after 3 retries — skip Lighthouse entirely, note "Lighthouse MCP unavailable" in report, proceed to Step 4 (Correlate).
 
 **1b. Warm the preview URL:**
 
@@ -272,9 +272,9 @@ Attempt 3: Hit /health, fresh Steps 1-2
 
 | Scenario | What to do in report |
 |---|---|
-| Desktop succeeded, mobile failed | Show desktop metrics normally. Mobile column shows "N/A — unavailable". Skip Mobile vs Desktop Comparison. |
+| Desktop succeeded, mobile failed | Show desktop metrics normally. Mobile column shows "N/A — unavailable". Skip the Mobile vs Desktop Comparison table but keep Mobile Responsiveness section (static mobile findings are still valid). |
 | Desktop failed, mobile succeeded | Show mobile metrics normally. Desktop column shows "N/A — unavailable". |
-| Both failed | Omit Lighthouse Metrics Dashboard and Mobile Responsiveness sections entirely. Note "Lighthouse MCP was unavailable — report based on static analysis only." Static analysis findings are always available. |
+| Both failed | Omit the Lighthouse Metrics Dashboard and the Lighthouse-based parts of Mobile Responsiveness. Keep the "Mobile Static Analysis Findings" subsection — those come from `perf_audit.py` and are always available. Note "Lighthouse MCP was unavailable — report based on static analysis only." |
 | Both succeeded | Full report with desktop + mobile comparison. |
 
 **IMPORTANT:** Lighthouse failures must NEVER block the pipeline. Static analysis (Step 3) is independent and always produces results regardless of Lighthouse status.
@@ -305,7 +305,7 @@ Cross-reference Step 3 static findings with Step 3b Lighthouse results:
 - Static "no media queries" + poor mobile score -> mark as "Confirmed — no responsive layout"
 - Static "100vh usage" + mobile CLS > 0.1 -> mark as confirmed
 
-If no runtime evidence is available, present static findings as "predicted" — they're still valid, just not yet confirmed at runtime.
+If Lighthouse was unavailable, present static findings as "predicted" — they're still valid, just not yet confirmed by browser measurement.
 
 ---
 
