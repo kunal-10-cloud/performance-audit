@@ -1,12 +1,12 @@
 ---
 name: perf-audit
-description: Performance audit pipeline (8 steps). Takes a Job ID + Slug Name + Preview URL, wakes sleeping pods, runs static performance analysis, measures Core Web Vitals via Lighthouse MCP, collects runtime evidence via cortex debugger, correlates findings, generates fix prompts, and drafts user email.
+description: Performance audit pipeline. Takes a Job ID + Slug Name + Preview URL, wakes sleeping pods, runs static performance analysis, measures Core Web Vitals via Lighthouse MCP (desktop + mobile), correlates findings, and generates a professional report with copy-pasteable fix prompts.
 ---
 
 # Performance Audit Skill
 
 ## Purpose
-Run a pre-launch performance audit on an Emergent app. Detects the app template (Next.js / Expo / Farm), runs 22+ static checks across backend, rendering, database, and algorithms, measures Core Web Vitals via Google Lighthouse, correlates static and runtime findings, then produces a PASS/FAIL report with copy-pasteable fix prompts.
+Run a pre-launch performance audit on an Emergent app. Detects the app template (Next.js / Expo / Farm), runs 36 static checks across backend, rendering, database, algorithms, and mobile responsiveness, measures Core Web Vitals via Google Lighthouse on desktop and mobile, correlates static and runtime findings, then produces a PASS/FAIL report with copy-pasteable fix prompts.
 
 ---
 
@@ -30,9 +30,7 @@ If no preview URL is given, the default is `https://{slug}.preview.emergentagent
 | MCP | Purpose | Setup |
 |---|---|---|
 | **e1** | Run perf analysis script on the pod via `env_key` | Emergent platform MCP — already wired into Overwatch/Claude Code |
-| **cortex_debugger** | Fetch runtime logs for performance evidence | Internal Emergent MCP — `http://cortex-debugger.int.apis.emergentagent.com/mcp` |
 | **lighthouse-mcp** | Measure Core Web Vitals (LCP, FCP, CLS, TBT) | Hosted at `https://lighthousemcp-566766422032.us-central1.run.app` — no local setup needed |
-| **Gmail** (optional) | Draft user email via `mcp__claude_ai_Gmail__create_draft` | Only required for Step 7 (customer email draft) |
 
 ### Hosted scripts
 
@@ -69,7 +67,7 @@ Store the token in memory for the duration of the audit session only. **Never lo
 
 ---
 
-## Pipeline (8 Steps)
+## Pipeline (6 Steps)
 
 ### Step 1 — Check Pod Status
 
@@ -279,31 +277,13 @@ Attempt 3: Hit /health, fresh Steps 1-2
 | Both failed | Omit Lighthouse Metrics Dashboard and Mobile Responsiveness sections entirely. Note "Lighthouse MCP was unavailable — report based on static analysis only." Static analysis findings are always available. |
 | Both succeeded | Full report with desktop + mobile comparison. |
 
-**IMPORTANT:** Lighthouse failures must NEVER block the pipeline. Static analysis (Step 3) and runtime evidence (Step 4) are independent and always produce results regardless of Lighthouse status.
+**IMPORTANT:** Lighthouse failures must NEVER block the pipeline. Static analysis (Step 3) is independent and always produces results regardless of Lighthouse status.
 
 ---
 
-### Step 4 — Runtime Evidence (Optional)
+### Step 4 — Correlate & Confirm Findings
 
-Use cortex debugger to look for runtime performance signals:
-
-1. **Fetch job logs:**
-   ```
-   get_job_logs(job_id="{job_id}", pattern="error|timeout|slow|memory|OOM")
-   ```
-
-2. **Fetch cost summary:**
-   ```
-   get_job_cost_summary(job_id="{job_id}")
-   ```
-
-If runtime evidence confirms a static finding, mark it as confirmed. If logs are unavailable (pod was sleeping), skip — static analysis findings are still valid.
-
----
-
-### Step 5 — Correlate & Confirm Findings
-
-Cross-reference Step 3 static findings with Step 3b Lighthouse results and Step 4 runtime evidence:
+Cross-reference Step 3 static findings with Step 3b Lighthouse results:
 
 **Static <-> Desktop Lighthouse correlation:**
 - Poor LCP + static "missing code splitting" or "heavy bundle" -> mark as "Confirmed by Lighthouse"
@@ -325,14 +305,11 @@ Cross-reference Step 3 static findings with Step 3b Lighthouse results and Step 
 - Static "no media queries" + poor mobile score -> mark as "Confirmed — no responsive layout"
 - Static "100vh usage" + mobile CLS > 0.1 -> mark as confirmed
 
-**Static <-> Runtime correlation:**
-- Runtime timeout errors -> confirm slow endpoint findings
-- Runtime memory warnings -> confirm memory leak findings
-- No runtime evidence -> present static findings as "predicted" (still valid)
+If no runtime evidence is available, present static findings as "predicted" — they're still valid, just not yet confirmed at runtime.
 
 ---
 
-### Step 6 — Compile Report
+### Step 5 — Compile Report
 
 Write the final report as markdown at `perf-audit/reports/{slug}.md`. Follow this exact template structure. Every report MUST use this format.
 
@@ -418,11 +395,6 @@ Write the final report as markdown at `perf-audit/reports/{slug}.md`. Follow thi
 
 ---
 
-## Runtime Evidence
-{Table: Signal | Result}
-
----
-
 ## Remediation Roadmap
 
 ### Fix before launch (Critical)
@@ -489,48 +461,22 @@ Assign each failing check a priority based on user impact:
 
 ---
 
-### Step 7 — Draft Gmail Email
+### Step 6 — Report Completion
 
-Create a Gmail draft with the top 3 fix prompts:
-
-```
-mcp__claude_ai_Gmail__create_draft(
-  to: ["{customer_email}"],
-  subject: "Performance check for your Emergent app",
-  htmlBody: "{HTML email}"
-)
-```
-
-**Email template:** Table-based HTML with inline CSS. Sections:
-1. **Header:** "Performance check for your app"
-2. **Greeting:** "Hi there" (never user's name)
-3. **Performance score section:** If Lighthouse ran, show score and key metrics (LCP, FCP, CLS, TBT) in a table. Keep it plain language.
-4. **Health check section:** 2-3 sentences, positive first, then top issues. Do NOT mention internal scores/grades.
-5. **Top 3 fix prompts** in separate code block cards (labeled Prompt 1, 2, 3)
-6. **Calendly CTA:** `https://calendly.com/d/ct45-y7p-23p/emergent-consultation?from=slack`
-7. **Footer:** "Best, Emergent Team" (never individual name)
-
-**HTML rules:**
-- Table-based layout (not divs) for Gmail/Outlook compatibility
-- ALL CSS inline
-- Use HTML entities for emojis
-- `contentType: text/html`
-
----
-
-### Step 8 — Report Completion
-
-Report the draft ID and confirm it's ready for review. Present the summary table to the operator.
+Write the report to `perf-audit/reports/{slug}.md` and present a summary table to the operator. Include:
+- Desktop + mobile Lighthouse scores
+- Severity counts (Critical / High / Low)
+- Top 3 findings
+- Location of the full report
 
 ---
 
 ## Error Handling
 
-- Pod wake fails -> report error, skip to Step 4 if possible
-- Performance analysis fails -> note in report, attempt runtime evidence only
+- Pod wake fails -> report error, continue with Lighthouse only if preview URL is still reachable
+- Static analysis fails -> note in report, continue with Lighthouse-only results
 - Lighthouse fails -> skip Step 3b, continue with static-only analysis
 - Template is `expo` -> skip Lighthouse, note "N/A (native app)"
-- Cortex debugger unreachable -> skip Step 4, use static analysis only
 - Template not detected -> run as "generic" (all template checks)
 
 ## Constraints
