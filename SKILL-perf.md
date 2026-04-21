@@ -23,26 +23,49 @@ If no preview URL is given, the default is `https://{slug}.preview.emergentagent
 
 ---
 
-## Required MCPs
+## Prerequisites
+
+### Required MCPs
 
 | MCP | Purpose | Setup |
 |---|---|---|
-| **e1** | Run perf analysis script on the pod via `env_key` | Must be configured in `~/.claude.json` — see CLAUDE.md |
-| **cortex_debugger** | Fetch runtime logs for performance evidence | Internal Emergent MCP |
-| **lighthouse-mcp** | Measure Core Web Vitals (LCP, FCP, CLS, TBT) | Deploy via `lighthouse-mcp/` or use hosted instance |
-| **Gmail** | Draft user email via `mcp__claude_ai_Gmail__create_draft` | Claude Code Gmail MCP |
+| **e1** | Run perf analysis script on the pod via `env_key` | Emergent platform MCP — already wired into Overwatch/Claude Code |
+| **cortex_debugger** | Fetch runtime logs for performance evidence | Internal Emergent MCP — `http://cortex-debugger.int.apis.emergentagent.com/mcp` |
+| **lighthouse-mcp** | Measure Core Web Vitals (LCP, FCP, CLS, TBT) | Hosted at `https://lighthousemcp-566766422032.us-central1.run.app` — no local setup needed |
+| **Gmail** (optional) | Draft user email via `mcp__claude_ai_Gmail__create_draft` | Only required for Step 7 (customer email draft) |
+
+### Hosted scripts
+
+The static analysis scripts (`perf_audit.py`, `perf_run_audit.py`) are hosted on GitHub raw URLs and downloaded onto the pod at audit time:
+- `https://raw.githubusercontent.com/kunal-10-cloud/performance-audit/main/perf_run_audit.py`
+- `https://raw.githubusercontent.com/kunal-10-cloud/performance-audit/main/perf_audit.py`
+
+The skill references these URLs directly — no need to bundle the scripts with this skill.
 
 ---
 
-## Environment Variables
+## Authentication
 
-The pipeline uses `{AUTH_TOKEN}` in API calls. This must be set as `EMERGENT_AUTH_TOKEN`:
+This skill makes authenticated calls to `api.emergent.sh` (for waking pods and checking status). It uses the **operator's own Emergent admin JWT token** — NOT a shared service account.
 
-```bash
-export EMERGENT_AUTH_TOKEN="your-jwt-token-here"
-```
+**Requirement:** The operator running this audit must have **admin access to the Emergent platform** so their token has permission to wake customer pods.
 
-Get it from: browser DevTools -> Network tab -> any `api.emergent.sh` request -> `Authorization` header value (without the `Bearer ` prefix).
+### How the token is resolved
+
+The skill uses a placeholder `{AUTH_TOKEN}` in API calls. At runtime, resolve it in this order:
+
+1. **If `EMERGENT_AUTH_TOKEN` environment variable is set** — use that value directly.
+2. **Otherwise** — prompt the operator once at the start of the audit:
+   > "Please paste your Emergent admin JWT token. You can get it from: browser DevTools → Network tab → any request to `api.emergent.sh` → copy the `Authorization` header value (without the `Bearer ` prefix). Or from browser console: `copy(JSON.parse(localStorage.getItem('sb-snksxwkyumhdykyrhhch-auth-token')).access_token)`"
+
+Store the token in memory for the duration of the audit session only. **Never log it, write it to a report, or include it in any committed file.**
+
+### Security rules
+
+- Never hardcode a token in this skill or any file derived from it
+- Never paste an actual token into reports, emails, or logs
+- The token is scoped to the individual operator — each operator uses their own
+- When this skill is invoked via Overwatch, Overwatch is expected to provide the token via `EMERGENT_AUTH_TOKEN` so the operator is not prompted manually
 
 ---
 
