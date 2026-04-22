@@ -446,6 +446,25 @@ If you find Lighthouse or static analysis misrepresenting a finding:
 
 Write the final report as markdown at `perf-audit/reports/{slug}.md`. Follow this exact template structure. Every report MUST use this format.
 
+#### CRITICAL RULE: Never reuse citations from previous reports
+
+Every `file:line` reference, function name, module name, and endpoint URL in the report MUST come from the **current audit's output** — not from memory, not from a previous audit of a different codebase, and not copy-pasted from an earlier report.
+
+**How this fails in practice:** When auditing a new codebase, it's tempting to reuse the narrative structure from a previous report. This is fine for the prose, but **any specific file paths or function names will be wrong** — different codebases have different file structures, different endpoint names, different service files. A report that cites `oracle_trigger` and `proactive_support_webhook` when auditing a site that has `invite_parent` and `stripe_webhook` is instantly non-credible.
+
+**Required self-check before finalizing the report:**
+
+For every file:line cited in the report (Location fields, Key Hotspots tables, Prompt templates), grep the current audit output to verify it's actually there:
+
+```bash
+# For each cited location, confirm it appears in the CURRENT audit:
+grep '<file:line>' /tmp/audit.txt
+```
+
+If the citation isn't in the current audit, **don't include it.** Either it's from a previous audit (remove it) or the finding shouldn't be in this report at all.
+
+**Prose framing (analogies, descriptions, general patterns) can be reused** — but every concrete identifier must be freshly extracted.
+
 #### Report Template
 
 ```markdown
