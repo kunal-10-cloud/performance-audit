@@ -291,8 +291,20 @@ def check_n_plus_1(backend_files):
 
 
 def check_unbounded_queries(backend_files):
-    """2.3 — Flag .find() calls without limit()."""
+    """2.3 — Flag .find() calls without any bound (limit() or to_list(N))."""
     findings = []
+
+    # Patterns that indicate a BOUNDED query (any of these means the query is safe):
+    # - .limit(N) or .limit(var)
+    # - .to_list(N) where N is a positive integer (not None, not length=None)
+    # - limit=N as kwarg
+    # Truly unbounded: .to_list(length=None), .to_list(None), .to_list()
+    bounded_pattern = re.compile(
+        r'\.limit\('                              # .limit( anything
+        r'|limit\s*='                              # limit= kwarg
+        r'|\.to_list\(\s*\d+\s*\)'                 # .to_list(50) — positive integer
+        r'|\.to_list\(\s*length\s*=\s*\d+\s*\)'    # .to_list(length=50)
+    )
 
     for fpath in backend_files:
         content = read_file_safe(fpath)
@@ -301,36 +313,45 @@ def check_unbounded_queries(backend_files):
 
         lines = content.split('\n')
         for i, line in enumerate(lines, 1):
-            # Look for .find() or .find({...}) without .limit()
-            if '.find(' in line and '.limit(' not in line and 'find_one' not in line:
-                # Check if limit is on the next few lines
-                context = '\n'.join(lines[i-1:min(i+3, len(lines))])
-                if '.limit(' not in context and 'limit=' not in context:
-                    # Extract function name
-                    func_match = None
-                    for j in range(i-1, max(0, i-30), -1):
-                        m = re.search(r'(?:async\s+)?def\s+(\w+)', lines[j-1] if j > 0 else '')
-                        if m:
-                            func_match = m.group(1)
-                            break
+            # Only match real .find( — NOT .find_one(, .find_one_and_*, find_and_modify, etc.
+            # Look for \.find\( not immediately followed by _one or _and
+            if not re.search(r'\.find\(', line):
+                continue
+            if re.search(r'\.find_one|\.find_and_', line):
+                continue
 
-                    # Check if this is in a route handler (GET endpoint returning lists)
-                    is_get = False
-                    for j in range(i-1, max(0, i-10), -1):
-                        if '@' in lines[j-1] and '.get(' in lines[j-1]:
-                            is_get = True
-                            break
+            # Check 5 lines of context (query can span multiple lines)
+            context_end = min(i + 5, len(lines))
+            context = '\n'.join(lines[i-1:context_end])
 
-                    if is_get or func_match:
-                        name = func_match or "unknown"
-                        findings.append(new_finding(
-                            "backend_efficiency", "A",
-                            f"Unbounded query in `{name}`",
-                            fpath, i,
-                            f"`.find()` call without `.limit()` in `{name}` returns all matching documents",
-                            "Response size grows unbounded as data increases, causing slow responses and high memory usage",
-                            f"Add pagination: `skip: int = 0, limit: int = 50` parameters, apply `.skip(skip).limit(limit)` to the query"
-                        ))
+            if bounded_pattern.search(context):
+                continue  # Bounded — skip
+
+            # Extract function name (look backward for the nearest def)
+            func_match = None
+            for j in range(i-1, max(0, i-30), -1):
+                m = re.search(r'(?:async\s+)?def\s+(\w+)', lines[j-1] if j > 0 else '')
+                if m:
+                    func_match = m.group(1)
+                    break
+
+            # Check if this is in a route handler (GET endpoint returning lists)
+            is_get = False
+            for j in range(i-1, max(0, i-10), -1):
+                if '@' in lines[j-1] and '.get(' in lines[j-1]:
+                    is_get = True
+                    break
+
+            if is_get or func_match:
+                name = func_match or "unknown"
+                findings.append(new_finding(
+                    "backend_efficiency", "A",
+                    f"Unbounded query in `{name}`",
+                    fpath, i,
+                    f"`.find()` call without `.limit()` or explicit `.to_list(N)` in `{name}` returns all matching documents",
+                    "Response size grows unbounded as data increases, causing slow responses and high memory usage",
+                    f"Add pagination: `skip: int = 0, limit: int = 50` parameters, apply `.skip(skip).limit(limit)` to the query, or use `.to_list(N)` with an explicit max"
+                ))
 
     return findings
 
@@ -587,41 +608,48 @@ def nextjs_checks(frontend_files, root):
                read_json_safe(os.path.join(root, "frontend", "package.json")) or {}
     all_deps = {**pkg_json.get("dependencies", {}), **pkg_json.get("devDependencies", {})}
 
-    # 3A.1 Production Mode Configuration
-    dockerfile = None
-    for name in ["Dockerfile", "docker-compose.yml", "package.json"]:
-        for search_root in [root, os.path.join(root, "frontend")]:
-            fpath = os.path.join(search_root, name)
-            content = read_file_safe(fpath)
-            if content and 'next dev' in content and name != "package.json":
-                findings.append(new_finding(
-                    "rendering_performance", "A",
-                    "Production using `next dev`",
-                    fpath, 0,
-                    "`next dev` found in deployment/production config",
-                    "Development mode disables all optimizations — pages load 10-50x slower",
-                    "Use `next build && next start` for production"
-                ))
+    # Only run truly Next.js-specific checks if Next.js is actually in use
+    is_nextjs = "next" in all_deps or any(
+        os.path.exists(os.path.join(root, n)) or os.path.exists(os.path.join(root, "frontend", n))
+        for n in ("next.config.js", "next.config.mjs", "next.config.ts")
+    )
 
-    # 3A.2 Data Fetching Strategy
-    for fpath in frontend_files:
-        content = read_file_safe(fpath)
-        if not content:
-            continue
-        if 'getServerSideProps' in content:
-            # Check if the data could be static
-            is_static_data = any(kw in content.lower() for kw in
-                               ['config', 'settings', 'about', 'faq', 'terms', 'privacy', 'landing'])
-            if is_static_data:
-                line = content[:content.index('getServerSideProps')].count('\n') + 1
-                findings.append(new_finding(
-                    "rendering_performance", "B",
-                    "getServerSideProps on static page",
-                    fpath, line,
-                    "`getServerSideProps` used on a page with near-static data",
-                    "Forces server rendering on every request instead of serving cached static HTML",
-                    "Switch to `getStaticProps` with ISR (`revalidate: 60`) for pages with infrequently changing data"
-                ))
+    # 3A.1 Production Mode Configuration — Next.js only
+    if is_nextjs:
+        for name in ["Dockerfile", "docker-compose.yml", "package.json"]:
+            for search_root in [root, os.path.join(root, "frontend")]:
+                fpath = os.path.join(search_root, name)
+                content = read_file_safe(fpath)
+                if content and 'next dev' in content and name != "package.json":
+                    findings.append(new_finding(
+                        "rendering_performance", "A",
+                        "Production using `next dev`",
+                        fpath, 0,
+                        "`next dev` found in deployment/production config",
+                        "Development mode disables all optimizations — pages load 10-50x slower",
+                        "Use `next build && next start` for production"
+                    ))
+
+    # 3A.2 Data Fetching Strategy — Next.js only (getServerSideProps is Next-specific)
+    if is_nextjs:
+        for fpath in frontend_files:
+            content = read_file_safe(fpath)
+            if not content:
+                continue
+            if 'getServerSideProps' in content:
+                # Check if the data could be static
+                is_static_data = any(kw in content.lower() for kw in
+                                   ['config', 'settings', 'about', 'faq', 'terms', 'privacy', 'landing'])
+                if is_static_data:
+                    line = content[:content.index('getServerSideProps')].count('\n') + 1
+                    findings.append(new_finding(
+                        "rendering_performance", "B",
+                        "getServerSideProps on static page",
+                        fpath, line,
+                        "`getServerSideProps` used on a page with near-static data",
+                        "Forces server rendering on every request instead of serving cached static HTML",
+                        "Switch to `getStaticProps` with ISR (`revalidate: 60`) for pages with infrequently changing data"
+                    ))
 
     # 3A.3 Code Splitting
     heavy_import_pattern = re.compile(
@@ -658,22 +686,47 @@ def nextjs_checks(frontend_files, root):
             ))
 
     # 3A.5 Image Optimization
+    # Only run Next.js Image recommendation if project actually uses Next.js.
+    # For non-Next.js React projects (CRA, Vite), recommend responsive srcset + lazy loading.
+    is_nextjs = "next" in all_deps or any(
+        os.path.exists(os.path.join(root, n)) or os.path.exists(os.path.join(root, "frontend", n))
+        for n in ("next.config.js", "next.config.mjs", "next.config.ts")
+    )
     img_tag_pattern = re.compile(r'<img\s', re.IGNORECASE)
+    img_findings_count = 0
     for fpath in frontend_files:
         content = read_file_safe(fpath)
         if not content:
             continue
         for match in img_tag_pattern.finditer(content):
+            # Skip if the img tag already has loading="lazy"
+            tag_end = content.find('>', match.start())
+            tag = content[match.start():tag_end] if tag_end > 0 else ''
+            if 'loading=' in tag and 'lazy' in tag:
+                continue  # Already lazy-loaded — not a finding
             line = content[:match.start()].count('\n') + 1
-            findings.append(new_finding(
-                "rendering_performance", "B",
-                "Native <img> instead of Next.js Image",
-                fpath, line,
-                "Native `<img>` tag used instead of Next.js `<Image>` component",
-                "Misses automatic lazy loading, WebP conversion, and responsive sizing",
-                "Replace with `import Image from 'next/image'` and use `<Image>` component"
-            ))
-        if len(findings) > 5:  # Cap img findings
+            if is_nextjs:
+                findings.append(new_finding(
+                    "rendering_performance", "B",
+                    "Native <img> instead of Next.js Image",
+                    fpath, line,
+                    "Native `<img>` tag used instead of Next.js `<Image>` component",
+                    "Misses automatic lazy loading, WebP conversion, and responsive sizing",
+                    "Replace with `import Image from 'next/image'` and use `<Image>` component"
+                ))
+            else:
+                findings.append(new_finding(
+                    "rendering_performance", "B",
+                    "Native <img> without optimization",
+                    fpath, line,
+                    "Native `<img>` tag without `loading='lazy'`, `srcset`, or modern format (WebP)",
+                    "Images load eagerly and at full resolution — wastes bandwidth and slows LCP",
+                    "Add `loading='lazy'` for below-the-fold images, use `srcset` for responsive variants, and serve WebP where possible"
+                ))
+            img_findings_count += 1
+            if img_findings_count >= 10:
+                break
+        if img_findings_count >= 10:
             break
 
     # 3A.6 Unnecessary Re-renders
@@ -729,6 +782,12 @@ def expo_checks(frontend_files, root):
     pkg_json = read_json_safe(os.path.join(root, "package.json")) or \
                read_json_safe(os.path.join(root, "frontend", "package.json")) or {}
     all_deps = {**pkg_json.get("dependencies", {}), **pkg_json.get("devDependencies", {})}
+
+    # Only run Expo-specific checks if Expo is actually in use
+    is_expo = "expo" in all_deps or any(
+        os.path.exists(os.path.join(root, n)) or os.path.exists(os.path.join(root, "frontend", n))
+        for n in ("app.json", "app.config.js", "app.config.ts")
+    ) and "react-native" in all_deps
 
     # 3B.1 ScrollView with Map on Large Lists
     for fpath in frontend_files:
@@ -788,48 +847,51 @@ def expo_checks(frontend_files, root):
                     "Add explicit `style={{ width: X, height: Y }}` or use `resizeMode` props"
                 ))
 
-    # 3B.6 Hermes Engine
-    app_json = read_json_safe(os.path.join(root, "app.json")) or \
-               read_json_safe(os.path.join(root, "frontend", "app.json")) or {}
-    app_config = read_file_safe(os.path.join(root, "app.config.js")) or \
-                 read_file_safe(os.path.join(root, "frontend", "app.config.js")) or ""
+    # 3B.6 Hermes Engine — only relevant if Expo is actually in use (React Native)
+    if is_expo:
+        app_json = read_json_safe(os.path.join(root, "app.json")) or \
+                   read_json_safe(os.path.join(root, "frontend", "app.json")) or {}
+        app_config = read_file_safe(os.path.join(root, "app.config.js")) or \
+                     read_file_safe(os.path.join(root, "frontend", "app.config.js")) or ""
 
-    hermes_enabled = False
-    if app_json:
-        expo_config = app_json.get("expo", {})
-        if expo_config.get("jsEngine") == "hermes":
+        hermes_enabled = False
+        if app_json:
+            expo_config = app_json.get("expo", {})
+            if expo_config.get("jsEngine") == "hermes":
+                hermes_enabled = True
+        if '"hermes"' in app_config or "'hermes'" in app_config:
             hermes_enabled = True
-    if '"hermes"' in app_config or "'hermes'" in app_config:
-        hermes_enabled = True
 
-    if not hermes_enabled:
-        findings.append(new_finding(
-            "rendering_performance", "B",
-            "Hermes engine not enabled",
-            "app.json", 0,
-            "Hermes JavaScript engine is not enabled in app config",
-            "Missing faster startup times, lower memory usage, and smaller APK size that Hermes provides",
-            'Add `"jsEngine": "hermes"` to the `expo` section of app.json'
-        ))
+        if not hermes_enabled:
+            findings.append(new_finding(
+                "rendering_performance", "B",
+                "Hermes engine not enabled",
+                "app.json", 0,
+                "Hermes JavaScript engine is not enabled in app config",
+                "Missing faster startup times, lower memory usage, and smaller APK size that Hermes provides",
+                'Add `"jsEngine": "hermes"` to the `expo` section of app.json'
+            ))
 
-    # 3B.7 Heavy Work During Animations
-    for fpath in frontend_files:
-        content = read_file_safe(fpath)
-        if not content:
-            continue
-        if 'navigation' in content.lower() and ('fetch(' in content or 'await ' in content):
-            if 'InteractionManager' not in content and 'runAfterInteractions' not in content:
-                # Check if there's API call in navigation handler
-                nav_patterns = ['onPress', 'navigate(', 'navigation.']
-                if any(p in content for p in nav_patterns):
-                    findings.append(new_finding(
-                        "rendering_performance", "B",
-                        "Heavy work during navigation",
-                        fpath, 0,
-                        "API calls or heavy operations during navigation transitions",
-                        "Causes animation jank — frames drop while waiting for async operations",
-                        "Defer heavy work with `InteractionManager.runAfterInteractions(() => { /* fetch data */ })`"
-                    ))
+    # 3B.7 Heavy Work During Animations — React Native/Expo specific pattern
+    # (InteractionManager is RN-only; onPress and navigation.navigate() are RN patterns)
+    if is_expo:
+        for fpath in frontend_files:
+            content = read_file_safe(fpath)
+            if not content:
+                continue
+            if 'navigation' in content.lower() and ('fetch(' in content or 'await ' in content):
+                if 'InteractionManager' not in content and 'runAfterInteractions' not in content:
+                    # Check if there's API call in navigation handler
+                    nav_patterns = ['onPress', 'navigate(', 'navigation.']
+                    if any(p in content for p in nav_patterns):
+                        findings.append(new_finding(
+                            "rendering_performance", "B",
+                            "Heavy work during navigation",
+                            fpath, 0,
+                            "API calls or heavy operations during navigation transitions",
+                            "Causes animation jank — frames drop while waiting for async operations",
+                            "Defer heavy work with `InteractionManager.runAfterInteractions(() => { /* fetch data */ })`"
+                        ))
 
     # 3B.8 SDK Version Compatibility
     if 'expo' in all_deps:
