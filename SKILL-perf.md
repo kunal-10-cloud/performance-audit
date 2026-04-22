@@ -1,12 +1,12 @@
 ---
 name: perf-audit
-description: Performance audit pipeline. Takes a Job ID + Slug Name + Preview URL, wakes sleeping pods, runs static performance analysis, measures Core Web Vitals via Lighthouse MCP (desktop + mobile), correlates findings, and generates a professional report with copy-pasteable fix prompts.
+description: Performance audit pipeline. Takes a Job ID + Slug Name + Preview URL, wakes sleeping pods, runs static performance analysis, measures Core Web Vitals via Lighthouse MCP (desktop + mobile), correlates findings, and generates a professional report with fix guidance for each issue.
 ---
 
 # Performance Audit Skill
 
 ## Purpose
-Run a pre-launch performance audit on an Emergent app. Detects the app template (Next.js / Expo / Farm), runs 36 static checks across backend, rendering, database, algorithms, and mobile responsiveness, measures Core Web Vitals via Google Lighthouse on desktop and mobile, correlates static findings with Lighthouse results, then produces a report with copy-pasteable fix prompts.
+Run a pre-launch performance audit on an Emergent app. Detects the app template (Next.js / Expo / Farm), runs 36 static checks across backend, rendering, database, algorithms, and mobile responsiveness, measures Core Web Vitals via Google Lighthouse on desktop and mobile, correlates static findings with Lighthouse results, then produces a report that describes each issue and offers fix guidance. **The report provides approach guidance and patterns to adapt — not ready-to-paste prompts. The final prompt wording is up to the operator.**
 
 ---
 
@@ -117,7 +117,7 @@ The pipeline automatically:
 **Output:** Two sections separated by `===SEPARATOR===`
 
 - **Section 1 — Check Results:** Each check as PASS or FAIL with file:line locations for failures. Summary table with pass/fail counts per category.
-- **Section 2 — Fix Prompts:** One self-contained prompt per failing check type. Copy-pasteable.
+- **Section 2 — Fix Guidance:** One fix approach per failing check type. These are **suggested approaches, not exact prompts** — the operator adapts them for their codebase.
 
 ---
 
@@ -309,6 +309,139 @@ If Lighthouse was unavailable, present static findings as "predicted" — they'r
 
 ---
 
+### Step 4b — Validate Findings (MANDATORY — do not skip)
+
+Before compiling the report, validate every finding against reality. Lighthouse sometimes overstates problems due to simulated throttling, and the static analyzer can have false positives. **A report with inflated findings damages credibility far more than one with fewer, accurate findings.**
+
+**Minimum validation required before any finding goes in the report as CRITICAL or HIGH:**
+
+1. For every Lighthouse-based CRITICAL — run the corresponding `curl` validation from Rules 1-3 below
+2. For every static-analysis CRITICAL — spot-check 2-3 file:line locations by reading the actual code via e1 MCP
+3. Apply the noise filter (Rule 6) — drop findings below actionability threshold
+
+Skipping this step means shipping an audit with known false positives. Don't.
+
+#### Rule 1 — "Redirects" opportunity: verify main-document vs sub-resource redirects
+
+If Lighthouse reports "Avoid multiple page redirects" with large savings (>500ms), do NOT assume the main URL has a redirect chain.
+
+**Validation:**
+```bash
+curl -sL -o /dev/null -w "Redirects: %{num_redirects}\nFinal URL: %{url_effective}\n" {preview_url}
+```
+
+**Three possible outcomes:**
+
+| curl result | Lighthouse savings | What's actually happening |
+|---|---|---|
+| 0 redirects | Small (<500 ms) | Lighthouse bug, ignore |
+| 0 redirects | Large (>500 ms) | **Sub-resource redirect** — a 3rd-party script or image is redirecting. Find it by checking `<script src>` tags for `@latest` CDN versions, or `<img src>` for unpinned URLs. The fix is usually pinning versions, NOT infrastructure changes. |
+| 1+ redirects on main URL | Any | Real main-page redirect chain. Report as infrastructure issue. |
+
+**In the report:**
+- If validation shows 0 main-page redirects, frame the finding as "sub-resource redirect" with the specific culprit identified
+- Do NOT write prompts about nginx/Cloudflare/DNS config — those don't apply
+- Lighthouse's savings number is often inflated by simulated throttling; note this in the finding
+
+#### Rule 2 — "Oversized images" / "Properly size images": verify with actual image weights
+
+If Lighthouse reports large KiB savings for image resizing, verify by checking actual image sizes:
+
+**Validation:**
+```bash
+curl -sL {preview_url} | grep -oE 'src="[^"]+\.(jpg|jpeg|png|webp|gif)"' | head -10
+# Then for each:
+curl -sL -o /dev/null -w "%{size_download} bytes\n" {image_url}
+```
+
+If individual images are small (<100 KB each), the finding may be about many images adding up, not any single oversized one.
+
+#### Rule 3 — "Unused JavaScript": verify with Coverage data
+
+Lighthouse's "unused JS" number assumes only the code running on the CURRENT page counts as "used." It doesn't know about code needed for other routes.
+
+**Validation:**
+- For a multi-page app, some "unused" JS might actually be needed on OTHER pages (legitimately shipped in the main bundle)
+- Check if the site is an SPA with many routes — if yes, some "unused" JS is expected
+
+**In the report:**
+- For SPAs: frame "unused JS" as "JS not needed on the current route" — code splitting is the fix
+- For truly single-page sites: it's genuinely unused and should be removed
+
+#### Rule 4 — Static analysis N+1 findings: spot-check for false positives
+
+The static analyzer pattern-matches `.find()` calls inside loops, which can false-positive on:
+- Loops that log events rather than query DB
+- Loops that operate on in-memory collections, not DB
+- Generator expressions that look like loops but aren't
+
+**Validation:**
+- Spot-check 3-5 of the N+1 findings by reading the actual code
+- If 2+ are false positives, the total count is inflated — use "X+" phrasing rather than an exact number
+- Example: "approximately 80+ N+1 patterns detected (some may be false positives; spot-checked 5, confirmed 4)"
+
+#### Rule 5 — Static analysis unbounded queries: distinguish user-facing from utility
+
+The analyzer flags ALL `.find()` without `.limit()`, but some are fine:
+- Utility/migration scripts that run once — unbounded is correct
+- Queries filtered to a single document (e.g., `find({"_id": id}).to_list()`) — not an issue
+- Admin-only exports — less urgent than user-facing
+
+**In the report:**
+- Separate user-facing route handlers (CRITICAL) from utility scripts (LOW/informational)
+- Don't lump `scripts/migrate_data.py` in with `routes/api.py`
+
+#### Rule 6 — Noise filter: drop findings below actionability threshold
+
+Lighthouse reports many tiny "opportunities" that aren't actually worth fixing. Drop or mark as informational-only:
+
+| Type | Threshold | What to do |
+|---|---|---|
+| Lighthouse opportunity | < 200 ms estimated savings | Don't include as a finding — mention in "Lighthouse Opportunities" table only |
+| Lighthouse diagnostic | < 10 KiB savings | Same — table only, not a finding |
+| Static unbounded-query | Utility/migration script only | Mark as LOW or exclude |
+| Static N+1 | Script that runs once a year | Mark as LOW or exclude |
+
+**Rationale:** A "3 KiB JavaScript minification savings" finding is pure noise — fixing it gains 3 KB on a multi-MB page. Including trivial findings dilutes the serious ones.
+
+#### Rule 7 — Framework mismatch check
+
+The `perf_audit.py` static analyzer runs all three template check suites (Next.js, Expo, Farm) for "generic" projects. This can produce inappropriate recommendations on React Create-React-App (CRA), Vite, or other non-matching frameworks.
+
+**Before including framework-specific findings, verify the framework is actually used:**
+
+```bash
+# Run on the pod to detect framework
+cat /app/frontend/package.json | grep -E '"(next|expo|@farmfe|vite|react-scripts)"'
+```
+
+**Framework-to-finding mapping:**
+
+| Framework detected | DROP these findings if they appear |
+|---|---|
+| Create React App (`react-scripts`) | "Next.js Image", "next dev", "getServerSideProps", "Hermes engine", "jsEngine: hermes" |
+| Vite | Same as CRA above |
+| Next.js | "Hermes engine" |
+| Expo / React Native | "Next.js Image", "next dev", "getServerSideProps" |
+
+**If dropped:** replace with framework-appropriate guidance. For example:
+- On CRA + native `<img>`: recommend `loading="lazy"` + `srcset` (not `next/image`)
+- On CRA + getServerSideProps: not applicable (drop the finding entirely)
+
+#### What to do when validation fails
+
+If you find Lighthouse or static analysis misrepresenting a finding:
+
+1. **Still include the finding if real** — but with corrected framing
+2. **Note the discrepancy explicitly** — "Lighthouse reported X ms savings; `curl` verification shows Y — the effective savings is likely Z"
+3. **Correct the severity** — if it's not as bad as Lighthouse says, downgrade from CRITICAL to HIGH or LOW
+4. **Give an accurate fix** — don't suggest infrastructure changes when the fix is a 1-line HTML edit
+5. **Drop entirely** if below noise threshold (Rule 6) or framework-inappropriate (Rule 7)
+
+**If >30% of findings need correction after validation,** note in the report: "Static analyzer had notable false-positive rate on this audit; counts reflect hand-validated subset only."
+
+---
+
 ### Step 5 — Compile Report
 
 Write the final report as markdown at `perf-audit/reports/{slug}.md`. Follow this exact template structure. Every report MUST use this format.
@@ -357,7 +490,7 @@ Write the final report as markdown at `perf-audit/reports/{slug}.md`. Follow thi
 - **Evidence:** {Technical evidence — what the check found}
 - **Impact:** {Technical impact}
 > **In plain terms:** {1-2 sentence analogy a non-developer can understand}
-- **Fix prompt:** {Copy-pasteable prompt for the agent}
+- **Prompt template:** A generic prompt structure with `{placeholders}` the user fills in — not a literal copy-paste prompt. See "Rules for Fix guidance" below for exact format.
 - **After fixing:** {What improves, in plain language}
 
 ### HIGH findings — Fix as you scale
@@ -445,10 +578,53 @@ Assign each failing check a priority based on user impact:
 - Technical location, evidence, and impact are required — keep full technical accuracy
 - **"In plain terms"** block is required for every CRITICAL and HIGH finding — use a real-world analogy
 - **"After fixing"** line is required for every finding — describe the user-visible improvement
-- **Fix prompt** must be self-contained and copy-pasteable into the Emergent agent
+- **Fix guidance** (NOT exact prompts) — describe *what approach* to take, not what literal prompt to paste
 - PASS checks go in a summary table — one row per check, with a brief "Notes" column explaining what it means
 - Lighthouse opportunities table must include a plain-language "What it means" column
 - Remediation roadmap groups findings by priority with "Expected improvement" column
+
+#### Rules for "Fix guidance"
+
+Users of this audit are typically **non-technical or semi-technical operators**. They need prompt text they can send to their agent — but not prompts so specific that they'll be held against us if the agent fails to act on them.
+
+**The solution: generic prompt templates** — a real prompt structure with placeholders the user fills in for their specific case.
+
+**Structure every finding's fix guidance like this:**
+
+```markdown
+**Prompt template** (fill in the placeholders before sending to your agent):
+
+> "{Verb: Fix / Refactor / Optimize} {one-line description of the problem}.
+>
+> Affected files: {paste the file:line list from the Location section above}
+>
+> Approach: {describe the strategy in 2-3 lines — e.g., 'batch the queries using `{"_id": {"$in": ids}}` instead of looping', or 'consolidate redirect chain to a single 301 hop'}
+>
+> Constraints:
+> - Don't change {list what to preserve — business logic, UI, auth, response shape}
+> - {Any other constraints relevant to this issue}
+>
+> Verify by: {simple sanity check the agent can run — e.g., 'run the endpoint and confirm same response shape' or 'run curl -IL to confirm single redirect'}"
+
+**Why this is a template not a ready-to-paste prompt:** The `{placeholders}` are intentional — they're meant to be filled in by the operator based on their codebase, agent, and specific situation. The structure is the guidance; the exact wording is the operator's.
+```
+
+**Tone rules:**
+
+- Always say "**Prompt template**" — makes it clear this is a starting point, not a canonical prompt
+- Always include `{placeholder}` markers — signals that customization is expected
+- Always include a "Constraints" line — teaches operators to tell their agent what NOT to change (this is often more important than what to change)
+- Always include a "Verify by" line — teaches operators to close the loop after the agent makes changes
+
+**Never use phrases like:**
+- "Copy this prompt into your agent" (sounds like a guarantee)
+- "Paste the following" (sounds like a guarantee)
+- "Use this exact wording" (sounds like a guarantee)
+
+**Instead use:**
+- "Prompt template (fill in the placeholders):"
+- "Starting point for your agent prompt:"
+- "Template — adapt for your case:"
 
 #### Report style rules
 
