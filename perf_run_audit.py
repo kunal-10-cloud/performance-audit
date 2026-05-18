@@ -245,23 +245,36 @@ def run_analyze(project_root):
 #  FACTS MODE (deterministic grep recipes for facts.json)
 # ══════════════════════════════════════════════════════════════════════
 
-def _grep_count(pattern, path, extra_flags=""):
+def _sh_quote(s):
+    """Quote s for POSIX shell without double-escaping backslashes (which is
+    what repr() would do — single-quoted shell text preserves backslashes
+    literally, so we just wrap in single quotes and escape any embedded
+    single quotes)."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _grep_count(pattern, path, includes=None):
+    """Count occurrences of regex pattern across files under path.
+    includes: optional list of file globs, e.g. ['*.py']. Returns int."""
     if not os.path.isdir(path):
         return 0
-    cmd = f"grep -rE {extra_flags} {repr(pattern)} {path} 2>/dev/null | wc -l"
+    flags = " ".join(f"--include={_sh_quote(g)}" for g in (includes or []))
+    cmd = f"grep -rE {flags} {_sh_quote(pattern)} {_sh_quote(path)} 2>/dev/null | wc -l"
     try:
-        out = subprocess.check_output(cmd, shell=True, text=True, timeout=30)
+        out = subprocess.check_output(cmd, shell=True, text=True, timeout=30, executable="/bin/bash")
         return int(out.strip())
     except Exception:
         return 0
 
 
-def _grep_files(pattern, path, extra_flags=""):
+def _grep_files(pattern, path, includes=None):
+    """Return list of files containing pattern under path."""
     if not os.path.isdir(path):
         return []
-    cmd = f"grep -rlE {extra_flags} {repr(pattern)} {path} 2>/dev/null"
+    flags = " ".join(f"--include={_sh_quote(g)}" for g in (includes or []))
+    cmd = f"grep -rlE {flags} {_sh_quote(pattern)} {_sh_quote(path)} 2>/dev/null"
     try:
-        out = subprocess.check_output(cmd, shell=True, text=True, timeout=30)
+        out = subprocess.check_output(cmd, shell=True, text=True, timeout=30, executable="/bin/bash")
         return [line.strip() for line in out.splitlines() if line.strip()]
     except Exception:
         return []
@@ -410,35 +423,35 @@ def run_facts(project_root):
         "framework_signature": _detect_framework_signature(project_root),
         "pydantic_major_version": _detect_pydantic_major(project_root),
         "tailwind_present": _detect_tailwind(project_root),
-        "create_index_count": _grep_count(r"\.create_index\s*\(", backend),
+        "create_index_count": _grep_count(r"\.create_index\s*\(", backend, includes=["*.py"]),
         "indexed_collections": _list_indexed_collections(project_root),
         "async_handler_count": _grep_count(
-            r"^\s*async\s+def\s+\w+", backend, extra_flags="--include='*.py'"
+            r"^\s*async\s+def\s+\w+", backend, includes=["*.py"]
         ),
         "route_declaration_count": _grep_count(
             r"@(app|router)\.(get|post|put|delete|patch)\s*\(",
             routes if os.path.isdir(routes) else backend,
-            extra_flags="--include='*.py'",
+            includes=["*.py"],
         ),
         "create_index_call_files": _grep_files(
-            r"\.create_index\s*\(", backend, extra_flags="--include='*.py'"
+            r"\.create_index\s*\(", backend, includes=["*.py"]
         ),
         "react_lazy_count": _grep_count(
             r"React\.lazy\s*\(|=\s*lazy\s*\(", frontend_src,
-            extra_flags="--include='*.js' --include='*.jsx' --include='*.ts' --include='*.tsx'",
+            includes=["*.js", "*.jsx", "*.ts", "*.tsx"],
         ),
         "source_lazy_call_files": _grep_files(
             r"React\.lazy\s*\(|=\s*lazy\s*\(", frontend_src,
-            extra_flags="--include='*.js' --include='*.jsx' --include='*.ts' --include='*.tsx'",
+            includes=["*.js", "*.jsx", "*.ts", "*.tsx"],
         ),
         "useeffect_cleanup_count": _grep_count(
             r"return\s*\(\s*\)\s*=>", frontend_src,
-            extra_flags="--include='*.js' --include='*.jsx' --include='*.ts' --include='*.tsx'",
+            includes=["*.js", "*.jsx", "*.ts", "*.tsx"],
         ),
         "virtualization_lib_imports": _grep_count(
             r"from\s+['\"](react-window|react-virtualized|@tanstack/react-virtual|react-virtual)['\"]",
             frontend_src,
-            extra_flags="--include='*.js' --include='*.jsx' --include='*.ts' --include='*.tsx'",
+            includes=["*.js", "*.jsx", "*.ts", "*.tsx"],
         ),
         "deployed_bundle_hash": bundle_info["deployed_bundle_hash"],
         "deployed_bundle_size_bytes": bundle_info["deployed_bundle_size_bytes"],
